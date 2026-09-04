@@ -1,0 +1,51 @@
+{
+  "model_name": "EcoSort_MobileNetV2",
+  "model_version": "MobileNetV2-v2",
+  "architecture": "MobileNetV2",
+  "input_size": [
+    224,
+    224
+  ],
+  "input_channels": 3,
+  "class_count": 6,
+  "classes": [
+    "Metal",
+    "Paper",
+    "Plastic",
+    "battery",
+    "glass",
+    "organic"
+  ],
+  "class_indices": {
+    "Metal": 0,
+    "Paper": 1,
+    "Plastic": 2,
+    "battery": 3,
+    "glass": 4,
+    "organic": 5
+  },
+  "preprocessing": {
+    "type": "embedded_rescaling",
+    "formula": "pixel / 127.5 - 1.0",
+    "input_range": "[0, 255]",
+    "output_range": "[-1, 1]"
+  },
+  "output": {
+    "activation": "softmax",
+    "type": "probability_distribution"
+  },
+  "training": {
+    "batch_size": 16,
+    "validation_split": 0.2,
+    "seed": 123,
+    "initial_epochs": 15,
+    "fine_tune_epochs": 10,
+    "initial_learning_rate": 0.0001,
+    "fine_tune_learning_rate": 1e-05
+  },
+  "validation": {
+    "accuracy": 0.987207,
+    "accuracy_percent": 98.7207,
+    "loss": 0.044205
+  }
+}
