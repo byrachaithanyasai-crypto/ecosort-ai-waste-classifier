@@ -1681,8 +1681,9 @@ textarea {
 
 .result-layout {
   display: grid;
-  grid-template-columns: 1fr 350px;
-  gap: 17px;
+  grid-template-columns: minmax(0, 1fr) 350px;
+  gap: 20px;
+  align-items: start;
 }
 
 .result-main-card {
@@ -1693,7 +1694,7 @@ textarea {
 }
 
 .result-header {
-  padding: 31px;
+  padding: 28px 31px 20px;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1750,10 +1751,11 @@ textarea {
 }
 
 .confidence-section {
-  padding: 10px 31px 36px;
-  display: flex;
+  padding: 18px 31px 34px;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
   align-items: center;
-  gap: 40px;
+  gap: 20px;
 }
 
 .confidence-ring-large {
@@ -1761,8 +1763,9 @@ textarea {
   width: 180px;
   height: 180px;
   flex: 0 0 auto;
-}
+  transform: translateX(190px);
 
+}
 .confidence-ring-large svg {
   width: 100%;
   height: 100%;
@@ -1808,7 +1811,12 @@ textarea {
 }
 
 .confidence-copy {
-  max-width: 540px;
+  width: 100%;
+  max-width: 680px;
+  justify-self: center;
+  align-self: center;
+  text-align: center;
+  transform: translateX(220px);
 }
 
 .confidence-copy h2 {
@@ -1854,7 +1862,7 @@ textarea {
 }
 
 .guidance-section {
-  padding: 30px 31px;
+  padding: 34px 31px 30px;
 }
 
 .guidance-heading {
@@ -2389,12 +2397,12 @@ textarea {
 }
 
 .insight-metric {
-  min-height: 73px;
+  min-height: 80px;
   margin: 0 20px;
   display: grid;
-  grid-template-columns: 34px 1fr auto;
+  grid-template-columns: 48px minmax(0, 1fr) 96px;
   align-items: center;
-  gap: 11px;
+  column-gap: 16px;
   border-bottom: 1px solid #edf1ef;
 }
 
@@ -2402,15 +2410,25 @@ textarea {
   border-bottom: 0;
 }
 
+.insight-metric > span:first-child {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  justify-self: start;
+}
+
 .insight-metric > span:nth-child(2) {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
+  text-align: left;
 }
 
 .insight-metric strong {
-  font-size: 16px;
+  font-size: 17px;
+  text-align: right;
+  justify-self: end;
 }
-
 .compact-section {
   padding-top: 100px;
   padding-bottom: 30px;
@@ -7120,4 +7138,270 @@ body,
   .page-container:has(.insight-hero-grid) .page-intro h1 {
     white-space: normal;
   }
+}
+/* ============================================================
+   SCAN WASTE — FINAL HEADING ALIGNMENT
+   SCAN WORKSPACE stays LEFT.
+   Heading + description become CENTER only.
+   ============================================================ */
+
+.page-container:has(.scan-layout) .page-intro {
+  display: grid !important;
+  grid-template-columns: 1fr !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.page-container:has(.scan-layout) .page-intro > div {
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.page-container:has(.scan-layout) .page-intro .eyebrow {
+  width: 100% !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+
+.page-container:has(.scan-layout) .page-intro h1 {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 15px auto 13px !important;
+  text-align: center !important;
+}
+
+.page-container:has(.scan-layout) .page-intro p {
+  width: 100% !important;
+  max-width: 850px !important;
+  margin: 0 auto !important;
+  text-align: center !important;
+}
+ /* HISTORY — exact page-center heading + description */
+.page-container:has(.history-toolbar) .page-intro {
+  position: relative !important;
+  display: block !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.page-container:has(.history-toolbar) .page-intro > div {
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.page-container:has(.history-toolbar) .page-intro h1 {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 15px auto 13px !important;
+  text-align: center !important;
+}
+
+.page-container:has(.history-toolbar) .page-intro p {
+  width: 100% !important;
+  max-width: 850px !important;
+  margin: 0 auto !important;
+  text-align: center !important;
+}
+
+/* Keep SCAN HISTORY on the left */
+.page-container:has(.history-toolbar) .page-intro .eyebrow {
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+
+/* Keep Clear history + New scan on the right */
+.page-container:has(.history-toolbar) .history-intro-actions {
+  position: absolute !important;
+  right: 0 !important;
+  bottom: 45px !important;
+}
+/* REVIEW QUEUE — center heading + description only */
+.page-container:has(.review-layout) .page-intro {
+  display: block !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.page-container:has(.review-layout) .page-intro > div {
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.page-container:has(.review-layout) .page-intro .eyebrow {
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+
+.page-container:has(.review-layout) .page-intro h1 {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 15px auto 13px !important;
+  text-align: center !important;
+}
+
+.page-container:has(.review-layout) .page-intro p {
+  width: 100% !important;
+  max-width: 900px !important;
+  margin: 0 auto !important;
+  text-align: center !important;
+}
+ /* REVIEW PAGE — FINAL CENTER ALIGNMENT */
+
+.page-container:has(.review-summary-grid) .page-intro {
+  position: relative !important;
+  display: block !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.page-container:has(.review-summary-grid) .page-intro > div:first-child {
+  width: 100% !important;
+  max-width: none !important;
+  text-align: center !important;
+}
+
+.page-container:has(.review-summary-grid) .page-intro .eyebrow {
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+
+.page-container:has(.review-summary-grid) .page-intro h1 {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 15px auto 13px !important;
+  text-align: center !important;
+}
+
+.page-container:has(.review-summary-grid) .page-intro p {
+  width: 100% !important;
+  max-width: 900px !important;
+  margin: 0 auto !important;
+  text-align: center !important;
+}
+/* INSIGHTS — center heading + description only */
+
+.page-view .insights-intro {
+  display: block !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.page-view .insights-intro > div {
+  width: 100% !important;
+  max-width: none !important;
+  text-align: center !important;
+}
+
+.page-view .insights-intro .eyebrow {
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+
+.page-view .insights-intro h1 {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 15px auto 13px !important;
+  text-align: center !important;
+}
+
+.page-view .insights-intro p {
+  width: 100% !important;
+  max-width: 900px !important;
+  margin: 0 auto !important;
+  text-align: center !important;
+}
+/* INSIGHTS - FINAL CENTER OVERRIDE */
+.page-container:has(.insight-hero-grid) .page-intro {
+  display: block !important;
+  width: 100% !important;
+  text-align: center !important;
+}
+
+.page-container:has(.insight-hero-grid) .page-intro > div:first-child {
+  width: 100% !important;
+  max-width: none !important;
+  text-align: center !important;
+}
+
+.page-container:has(.insight-hero-grid) .page-intro .eyebrow {
+  justify-content: flex-start !important;
+}
+
+.page-container:has(.insight-hero-grid) .page-intro h1 {
+  display: block !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 15px auto 13px !important;
+  text-align: center !important;
+}
+
+.page-container:has(.insight-hero-grid) .page-intro p {
+  display: block !important;
+  width: 100% !important;
+  max-width: 900px !important;
+  margin: 0 auto !important;
+  text-align: center !important;
+}
+/* INSIGHTS — FINAL STRUCTURED CENTER ALIGNMENT */
+
+.distribution-legend {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.legend-row {
+  width: 100%;
+  text-align: center;
+}
+
+.legend-label {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 20px 1fr 40px;
+  align-items: center;
+  column-gap: 10px;
+}
+
+.legend-label strong {
+  text-align: center;
+}
+
+.legend-label > span:last-child {
+  text-align: right;
+}
+
+
+/* OPERATIONAL SIGNALS */
+
+.insight-metric {
+  min-height: 80px;
+  margin: 0 20px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 90px;
+  align-items: center;
+  column-gap: 16px;
+  border-bottom: 1px solid #edf1ef;
+}
+
+.insight-metric:last-child {
+  border-bottom: 0;
+}
+
+.insight-metric > span:first-child {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+}
+
+.insight-metric > span:nth-child(2) {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.insight-metric strong {
+  font-size: 17px;
+  text-align: right;
 }
