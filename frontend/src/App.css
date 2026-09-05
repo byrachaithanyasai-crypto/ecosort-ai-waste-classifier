@@ -434,7 +434,7 @@ textarea {
 .hero-copy > p {
   max-width: 620px;
   margin: 0;
-  color: var(--muted);
+  color: #000000;
   font-size: 16px;
   line-height: 1.75;
 }
@@ -906,6 +906,7 @@ textarea {
   line-height: 1.04;
   letter-spacing: -0.05em;
   font-weight: 600;
+  color: #000000;
 }
 
 .section-heading p {
@@ -956,6 +957,7 @@ textarea {
   margin: 19px 0 10px;
   font-size: 25px;
   letter-spacing: -0.03em;
+  color: #000000;
 }
 
 .method-card p {
@@ -1015,6 +1017,7 @@ textarea {
   margin: 32px 0 10px;
   font-size: 27px;
   letter-spacing: -0.04em;
+  color: #000000;
 }
 
 .waste-stream-card p {
@@ -1823,6 +1826,7 @@ textarea {
   margin: 11px 0 9px;
   font-size: 27px;
   letter-spacing: -0.04em;
+  color: #000000;
 }
 
 .confidence-copy > p {
