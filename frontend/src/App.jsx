@@ -2560,9 +2560,9 @@ function InsightMetric({ label, value, icon }) {
   );
 }
 
-function PageIntro({ eyebrow, title, description, action }) {
+function PageIntro({ eyebrow, title, description, action, className = "" }) {
   return (
-    <div className="page-intro">
+    <div className={`page-intro ${className}`}>
       <div>
         <div className="eyebrow">
           <span className="eyebrow-line" />

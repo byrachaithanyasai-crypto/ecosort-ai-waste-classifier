@@ -7405,3 +7405,351 @@ body,
   font-size: 17px;
   text-align: right;
 }
+/* =========================================================
+   ECOSORT — PREMIUM CURSOR BACKGROUND
+   Does not change text, features, cards or functionality.
+   ========================================================= */
+
+html,
+body,
+#root {
+  background: #f4f8f5 !important;
+}
+
+/* Soft animated ambient background */
+#root {
+  position: relative;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+#root::before {
+  content: "";
+  position: fixed;
+  inset: -20%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      circle at 18% 18%,
+      rgba(76, 150, 116, 0.11),
+      transparent 28%
+    ),
+    radial-gradient(
+      circle at 82% 22%,
+      rgba(126, 180, 151, 0.10),
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at 55% 82%,
+      rgba(73, 137, 104, 0.08),
+      transparent 32%
+    );
+  filter: blur(20px);
+  animation: ecosortAmbient 14s ease-in-out infinite alternate;
+}
+
+/* Cursor-following glow */
+#root::after {
+  content: "";
+  position: fixed;
+  left: var(--cursor-x, 50vw);
+  top: var(--cursor-y, 50vh);
+  width: 420px;
+  height: 420px;
+  z-index: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(55, 133, 94, 0.13) 0%,
+    rgba(55, 133, 94, 0.06) 28%,
+    rgba(55, 133, 94, 0.025) 48%,
+    transparent 72%
+  );
+  filter: blur(12px);
+  transition:
+    left 0.12s ease-out,
+    top 0.12s ease-out;
+}
+
+/* Keep all existing UI above the background */
+#root > * {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes ecosortAmbient {
+  0% {
+    transform: translate3d(-1%, -1%, 0) scale(1);
+  }
+
+  50% {
+    transform: translate3d(1.5%, 1%, 0) scale(1.03);
+  }
+
+  100% {
+    transform: translate3d(-0.5%, 1.5%, 0) scale(1.01);
+  }
+}
+/* =========================================================
+   ECOSORT — MOVING BACKGROUND ANIMATION
+   Background only. Existing UI/content untouched.
+   ========================================================= */
+
+html,
+body,
+#root {
+  background: #f4f8f5 !important;
+}
+
+#root {
+  position: relative;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Main animated ambient layer */
+#root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+
+  background:
+    radial-gradient(circle at 15% 20%,
+      rgba(40, 130, 88, 0.12),
+      transparent 24%),
+    radial-gradient(circle at 82% 28%,
+      rgba(84, 155, 112, 0.10),
+      transparent 25%),
+    radial-gradient(circle at 55% 82%,
+      rgba(52, 135, 91, 0.08),
+      transparent 27%);
+
+  filter: blur(8px);
+  animation: ecosortFloat 18s ease-in-out infinite alternate;
+}
+
+/* Moving technical grid */
+#root::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+
+  background-image:
+    linear-gradient(
+      rgba(39, 111, 79, 0.035) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      rgba(39, 111, 79, 0.035) 1px,
+      transparent 1px
+    );
+
+  background-size: 70px 70px;
+  opacity: 0.45;
+  animation: ecosortGrid 28s linear infinite;
+}
+
+/* Keep actual application content above animation */
+#root > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Floating ambient movement */
+@keyframes ecosortFloat {
+  0% {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+
+  33% {
+    transform: translate3d(2%, 1%, 0) scale(1.04);
+  }
+
+  66% {
+    transform: translate3d(-1%, 2%, 0) scale(1.02);
+  }
+
+  100% {
+    transform: translate3d(1%, -1%, 0) scale(1.05);
+  }
+}
+
+/* Slow moving grid */
+@keyframes ecosortGrid {
+  from {
+    background-position: 0 0, 0 0;
+  }
+
+  to {
+    background-position: 70px 70px, 70px 70px;
+  }
+}
+
+/* Accessibility */
+@media (prefers-reduced-motion: reduce) {
+  #root::before,
+  #root::after {
+    animation: none;
+  }
+}
+/* =========================================================
+   ECOSORT — BACKGROUND ANIMATION ONLY
+   Cursor untouched. UI untouched.
+   ========================================================= */
+
+html,
+body,
+#root {
+  background: #f4f8f5 !important;
+}
+
+#root {
+  position: relative;
+  isolation: isolate;
+  overflow-x: hidden;
+}
+
+/* Soft moving green light */
+#root::before {
+  content: "";
+  position: fixed;
+  inset: -20%;
+  z-index: -2;
+  pointer-events: none;
+
+  background:
+    radial-gradient(
+      circle at 20% 20%,
+      rgba(63, 150, 100, 0.16),
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at 80% 30%,
+      rgba(110, 180, 135, 0.13),
+      transparent 32%
+    ),
+    radial-gradient(
+      circle at 55% 80%,
+      rgba(55, 135, 90, 0.11),
+      transparent 30%
+    );
+
+  filter: blur(35px);
+  animation: ecosortBgFloat 18s ease-in-out infinite alternate;
+}
+
+/* Moving light streaks */
+#root::after {
+  content: "";
+  position: fixed;
+  inset: -50%;
+  z-index: -1;
+  pointer-events: none;
+
+  background:
+    linear-gradient(
+      115deg,
+      transparent 45%,
+      rgba(56, 139, 91, 0.045) 50%,
+      transparent 55%
+    ),
+    linear-gradient(
+      245deg,
+      transparent 45%,
+      rgba(56, 139, 91, 0.035) 50%,
+      transparent 55%
+    );
+
+  background-size: 500px 500px, 620px 620px;
+  animation: ecosortLightMove 24s linear infinite;
+}
+
+/* Keep every existing component above the background */
+#root > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Ambient floating motion */
+@keyframes ecosortBgFloat {
+  0% {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+
+  50% {
+    transform: translate3d(2%, 2%, 0) scale(1.06);
+  }
+
+  100% {
+    transform: translate3d(-1%, -2%, 0) scale(1.03);
+  }
+}
+
+/* Slow moving diagonal lights */
+@keyframes ecosortLightMove {
+  from {
+    transform: translate3d(-220px, -160px, 0);
+  }
+
+  to {
+    transform: translate3d(220px, 160px, 0);
+  }
+}
+
+/* Stop animation when user prefers reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  #root::before,
+  #root::after {
+    animation: none;
+  }
+}
+/* =========================================================
+   CURSOR PARALLAX — EXISTING UI BOXES ONLY
+   Subtle movement, no layout changes.
+   ========================================================= */
+
+:root {
+  --mx: 0px;
+  --my: 0px;
+}
+
+/* Main cards / panels */
+.surface,
+.panel,
+.metric-card,
+.scan-workspace-card,
+.result-panel,
+.result-sidebar,
+.insight-card,
+.method-card,
+.waste-stream-card,
+.review-row {
+  transition:
+    transform 0.35s cubic-bezier(.22, 1, .36, 1),
+    box-shadow 0.35s ease;
+}
+
+/* Slight response when page receives cursor position */
+.parallax-card {
+  transform:
+    translate3d(
+      calc(var(--mx) * 0.02),
+      calc(var(--my) * 0.02),
+      0
+    );
+}
+
+/* Disable on touch devices */
+@media (max-width: 760px) {
+  .parallax-card {
+    transform: none !important;
+  }
+}
