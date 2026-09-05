@@ -1,6 +1,11 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+import base64
+import hashlib
+import hmac
+import os
+import re
 import io
 import json
 import logging
@@ -17,11 +22,16 @@ from fastapi import (
     File,
     HTTPException,
     UploadFile,
+    Request,
 )
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from .database import (
+    get_connection,
+    _now,
     get_history,
     get_prediction,
     get_review_queue,
@@ -50,6 +60,296 @@ logging.basicConfig(
 logger = logging.getLogger(
     "ecosort.api"
 )
+
+
+# ============================================================
+# AUTHENTICATION / AUTHORIZATION
+# ============================================================
+
+AUTH_SECRET = os.getenv(
+    "ECOSORT_AUTH_SECRET",
+    "dev-only-change-this-secret-before-production",
+)
+AUTH_TOKEN_TTL_SECONDS = int(os.getenv("ECOSORT_AUTH_TOKEN_TTL", "86400"))
+
+DEFAULT_ADMIN_EMAIL = os.getenv(
+    "ECOSORT_ADMIN_EMAIL",
+    "admin@ecosort.local",
+).strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv(
+    "ECOSORT_ADMIN_PASSWORD",
+    "EcoSortAdmin@123",
+)
+DEFAULT_ADMIN_NAME = os.getenv(
+    "ECOSORT_ADMIN_NAME",
+    "EcoSort Administrator",
+)
+
+PUBLIC_AUTH_PATHS = {
+    "/",
+    "/health",
+    "/categories",
+    "/model-info",
+    "/api-info",
+    "/status",
+    "/endpoints",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/auth/login",
+    "/auth/signup",
+}
+
+
+class AuthCredentials(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class SignupRequest(AuthCredentials):
+    full_name: str = Field(min_length=2, max_length=120)
+
+
+class AdminUserUpdate(BaseModel):
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _b64decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
+    salt = salt or os.urandom(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        200_000,
+    )
+    return f"{salt.hex()}:{digest.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """Verify both current PBKDF2 format and legacy salt:digest format."""
+    if not password or not stored:
+        return False
+
+    stored = str(stored)
+
+    # Current database.py format:
+    # pbkdf2_sha256$200000$salt_hex$digest_hex
+    if stored.startswith("pbkdf2_"):
+        try:
+            algorithm_tag, iterations_text, salt_hex, digest_hex = stored.split("$", 3)
+
+            algorithm = algorithm_tag.removeprefix("pbkdf2_")
+            iterations = int(iterations_text)
+            salt = bytes.fromhex(salt_hex)
+            expected = bytes.fromhex(digest_hex)
+
+            actual = hashlib.pbkdf2_hmac(
+                algorithm,
+                str(password).encode("utf-8"),
+                salt,
+                iterations,
+            )
+
+            return hmac.compare_digest(actual, expected)
+
+        except (ValueError, TypeError, UnicodeError):
+            return False
+
+    # Legacy salt:digest format
+    try:
+        salt_hex, digest_hex = stored.split(":", 1)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except (TypeError, ValueError):
+        return False
+
+    actual = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt,
+        200_000,
+    )
+
+    return hmac.compare_digest(actual, expected)
+
+
+def _ensure_auth_tables() -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                last_login_at TEXT
+            )
+            """
+        )
+
+        row = connection.execute(
+            "SELECT id FROM users WHERE email = ? LIMIT 1",
+            (DEFAULT_ADMIN_EMAIL,),
+        ).fetchone()
+
+        if not row:
+            connection.execute(
+                """
+                INSERT INTO users (
+                    email, password_hash, full_name, role, is_active, created_at
+                ) VALUES (?, ?, ?, 'admin', 1, ?)
+                """,
+                (
+                    DEFAULT_ADMIN_EMAIL,
+                    _hash_password(DEFAULT_ADMIN_PASSWORD),
+                    DEFAULT_ADMIN_NAME,
+                    _now(),
+                ),
+            )
+
+        connection.commit()
+
+
+def _public_user(row) -> dict:
+    return {
+        "id": int(row["id"]),
+        "email": row["email"],
+        "full_name": row["full_name"],
+        "role": row["role"],
+        "is_active": bool(row["is_active"]),
+        "created_at": row["created_at"],
+        "last_login_at": row["last_login_at"],
+    }
+
+
+def _get_user_record(email: str):
+    with get_connection() as connection:
+        return connection.execute(
+            "SELECT * FROM users WHERE email = ? LIMIT 1",
+            (str(email or "").strip().lower(),),
+        ).fetchone()
+
+
+def _token_for_user(row) -> str:
+    header = _b64encode(b'{"alg":"HS256","typ":"ECOSORT"}')
+    payload = {
+        "sub": int(row["id"]),
+        "email": row["email"],
+        "role": row["role"],
+        "exp": int(time.time()) + AUTH_TOKEN_TTL_SECONDS,
+    }
+    payload_part = _b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signing_input = f"{header}.{payload_part}".encode("ascii")
+    signature = hmac.new(
+        AUTH_SECRET.encode("utf-8"),
+        signing_input,
+        hashlib.sha256,
+    ).digest()
+    return f"{header}.{payload_part}.{_b64encode(signature)}"
+
+
+def _user_from_token(token: str):
+    try:
+        header, payload_part, signature_part = token.split(".", 2)
+        signing_input = f"{header}.{payload_part}".encode("ascii")
+        expected = hmac.new(
+            AUTH_SECRET.encode("utf-8"),
+            signing_input,
+            hashlib.sha256,
+        ).digest()
+        actual = _b64decode(signature_part)
+        if not hmac.compare_digest(actual, expected):
+            return None
+        payload = json.loads(_b64decode(payload_part).decode("utf-8"))
+        if int(payload.get("exp", 0)) < int(time.time()):
+            return None
+        user_id = int(payload["sub"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM users WHERE id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if not row or not bool(row["is_active"]):
+            return None
+        return _public_user(row)
+
+
+def _require_user(request: Request) -> dict:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "authentication_required",
+                "message": "Please sign in to continue.",
+            },
+        )
+    return user
+
+
+def _require_admin(request: Request) -> dict:
+    user = _require_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "admin_required",
+                "message": "Administrator access is required for this action.",
+            },
+        )
+    return user
+
+
+def _data_scope_user_id(request: Request):
+    """Return the authenticated user's id for normal users, or None for admins."""
+    user = _require_user(request)
+    if user.get("role") == "admin":
+        return None
+    return int(user["id"])
+
+
+def _validate_email(email: str) -> str:
+    value = str(email or "").strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_email",
+                "message": "Please provide a valid email address.",
+            },
+        )
+    return value
+
+
+def _validate_password(password: str) -> str:
+    value = str(password or "")
+    if len(value) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "weak_password",
+                "message": "Password must be at least 8 characters long.",
+            },
+        )
+    return value
 
 
 # ============================================================
@@ -516,11 +816,13 @@ app.add_middleware(
     CORSMiddleware,
 
     allow_origins=[
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-],
+        origin.strip()
+        for origin in os.getenv(
+            "ECOSORT_ALLOWED_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
+        ).split(",")
+        if origin.strip()
+    ],
 
     allow_credentials=True,
 
@@ -532,6 +834,29 @@ app.add_middleware(
         "*"
     ],
 )
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path in PUBLIC_AUTH_PATHS:
+        return await call_next(request)
+
+    authorization = request.headers.get("Authorization", "")
+    user = None
+    if authorization.lower().startswith("bearer "):
+        user = _user_from_token(authorization[7:].strip())
+
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": "authentication_required",
+                "message": "Please sign in to continue.",
+            },
+        )
+
+    request.state.user = user
+    return await call_next(request)
 
 
 # ============================================================
@@ -1063,6 +1388,155 @@ def build_top_predictions(
 
 
 # ============================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================
+
+@app.post("/auth/signup")
+async def auth_signup(payload: SignupRequest):
+    email = _validate_email(payload.email)
+    password = _validate_password(payload.password)
+    full_name = str(payload.full_name or "").strip()
+
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT id FROM users WHERE email = ? LIMIT 1",
+            (email,),
+        ).fetchone()
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "email_exists",
+                    "message": "An account with this email already exists.",
+                },
+            )
+
+        cursor = connection.execute(
+            """
+            INSERT INTO users (
+                email, password_hash, full_name, role, is_active, created_at
+            ) VALUES (?, ?, ?, 'user', 1, ?)
+            """,
+            (email, _hash_password(password), full_name, _now()),
+        )
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    return {
+        "message": "Account created successfully.",
+        "user": _public_user(row),
+        "token": _token_for_user(row),
+    }
+
+
+@app.post("/auth/login")
+async def auth_login(payload: AuthCredentials):
+    email = _validate_email(payload.email)
+    row = _get_user_record(email)
+    if not row or not bool(row["is_active"]) or not _verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "invalid_credentials",
+                "message": "Email or password is incorrect.",
+            },
+        )
+
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE users SET last_login_at = ? WHERE id = ?",
+            (_now(), row["id"]),
+        )
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (row["id"],),
+        ).fetchone()
+
+    return {
+        "message": "Login successful.",
+        "user": _public_user(row),
+        "token": _token_for_user(row),
+    }
+
+
+@app.get("/auth/me")
+async def auth_me(request: Request):
+    return {"user": _require_user(request)}
+
+
+@app.get("/admin/users")
+async def admin_users(request: Request, limit: int = 100):
+    _require_admin(request)
+    limit = max(1, min(int(limit or 100), 1000))
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM users ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {"count": len(rows), "items": [_public_user(row) for row in rows]}
+
+
+@app.patch("/admin/users/{user_id}")
+async def admin_update_user(user_id: int, payload: AdminUserUpdate, request: Request):
+    admin = _require_admin(request)
+    role = None if payload.role is None else str(payload.role).strip().lower()
+    if role is not None and role not in {"user", "admin"}:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_role", "message": "Role must be user or admin."},
+        )
+    if user_id == int(admin["id"]) and role == "user":
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "cannot_demote_self", "message": "You cannot remove your own admin access."},
+        )
+    if user_id == int(admin["id"]) and payload.is_active is False:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "cannot_disable_self", "message": "You cannot disable your own account."},
+        )
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM users WHERE id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "user_not_found", "message": "User not found."},
+            )
+
+        updates = []
+        params = []
+        if role is not None:
+            updates.append("role = ?")
+            params.append(role)
+        if payload.is_active is not None:
+            updates.append("is_active = ?")
+            params.append(1 if payload.is_active else 0)
+
+        if updates:
+            params.append(user_id)
+            connection.execute(
+                f"UPDATE users SET {', '.join(updates)} WHERE id = ?",
+                tuple(params),
+            )
+            connection.commit()
+
+        updated = connection.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+    return {"message": "User updated successfully.", "user": _public_user(updated)}
+
+
+# ============================================================
 # ROOT
 # ============================================================
 
@@ -1424,7 +1898,10 @@ async def analyze_image(
 @app.post("/predict")
 async def predict_waste(
     file: UploadFile = File(...),
+    request: Request = None,
 ):
+
+    current_user = _require_user(request)
 
     start_time = (
         time.perf_counter()
@@ -1792,6 +2269,7 @@ async def predict_waste(
             review_status=(
                 review_status
             ),
+            user_id=int(current_user["id"]),
         )
 
 
@@ -1929,6 +2407,7 @@ def history(
     min_confidence: Optional[float] = None,
     max_confidence: Optional[float] = None,
     sort: str = "newest",
+    request: Request = None,
 ):
 
     limit = max(
@@ -2058,6 +2537,8 @@ def history(
         )
 
 
+    scoped_user_id = _data_scope_user_id(request)
+
     items = get_history(
         limit=limit,
 
@@ -2076,6 +2557,7 @@ def history(
         max_confidence=max_confidence,
 
         sort=sort,
+        user_id=scoped_user_id,
     )
 
 
@@ -2095,6 +2577,7 @@ def history(
 )
 def history_item(
     prediction_id: str,
+    request: Request = None,
 ):
 
     prediction_id = (
@@ -2116,8 +2599,11 @@ def history_item(
         )
 
 
+    scoped_user_id = _data_scope_user_id(request)
+
     result = get_prediction(
-        prediction_id
+        prediction_id,
+        user_id=scoped_user_id,
     )
 
 
@@ -2145,11 +2631,12 @@ def history_item(
 # ============================================================
 
 @app.get("/stats")
-def stats():
+def stats(request: Request):
 
     try:
 
-        return get_stats()
+        scoped_user_id = _data_scope_user_id(request)
+        return get_stats(user_id=scoped_user_id)
 
     except Exception:
 
@@ -2176,7 +2663,10 @@ def stats():
 @app.get("/review-queue")
 def review_queue(
     limit: int = 100,
+    request: Request = None,
 ):
+
+    _require_admin(request)
 
     limit = max(
         1,
@@ -2228,7 +2718,10 @@ async def feedback(
     is_correct: bool,
     corrected_category: Optional[str] = None,
     reviewer_note: Optional[str] = None,
+    request: Request = None,
 ):
+
+    scoped_user_id = _data_scope_user_id(request)
 
     prediction_id = (
         prediction_id.strip()
@@ -2236,7 +2729,8 @@ async def feedback(
 
 
     prediction = get_prediction(
-        prediction_id
+        prediction_id,
+        user_id=scoped_user_id,
     )
 
 
@@ -2371,7 +2865,10 @@ async def verify(
     prediction_id: str,
     final_category: str,
     reviewer_note: Optional[str] = None,
+    request: Request = None,
 ):
+
+    _require_admin(request)
 
     prediction_id = (
         prediction_id.strip()

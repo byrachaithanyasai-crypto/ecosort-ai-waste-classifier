@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const API_BASE =
-  import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:8001";
 
 const NAV_ITEMS = [
   { id: "overview", label: "Overview", icon: "grid" },
   { id: "scan", label: "Scan Waste", icon: "scan" },
   { id: "history", label: "History", icon: "clock" },
-  { id: "review", label: "Review Queue", icon: "shield" },
+  { id: "review", label: "Review Queue", icon: "shield", adminOnly: true },
   { id: "insights", label: "Insights", icon: "chart" },
 ];
 
@@ -189,6 +189,9 @@ function Icon({ name, size = 20, strokeWidth = 1.8 }) {
 
 function App() {
   const [page, setPage] = useState("overview");
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState("login");
   const [history, setHistory] = useState([]);
   const [queue, setQueue] = useState([]);
   const [stats, setStats] = useState(null);
@@ -222,12 +225,15 @@ function App() {
   }, []);
 
   const api = useCallback(async (endpoint, options = {}) => {
+    const token = localStorage.getItem("ecosort_auth_token");
+
     const response = await fetch(`${API_BASE}${endpoint}`, {
       ...options,
       headers: {
         ...(options.body instanceof FormData
           ? {}
           : { "Content-Type": "application/json" }),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(options.headers || {}),
       },
     });
@@ -235,12 +241,65 @@ function App() {
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(
-        data.detail || data.message || `Request failed (${response.status})`
-      );
+      const message =
+        typeof data.detail === "object"
+          ? data.detail?.message
+          : data.detail || data.message;
+
+      if (response.status === 401) {
+        localStorage.removeItem("ecosort_auth_token");
+        setCurrentUser(null);
+      }
+
+      throw new Error(message || `Request failed (${response.status})`);
     }
 
     return data;
+  }, []);
+
+  const handleAuthSuccess = useCallback((data) => {
+    if (data?.token) localStorage.setItem("ecosort_auth_token", data.token);
+    if (data?.user) setCurrentUser(data.user);
+    setAuthMode("login");
+    setPage("overview");
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem("ecosort_auth_token");
+    setCurrentUser(null);
+    setSelectedResult(null);
+    setMobileMenu(false);
+    setNotificationsOpen(false);
+    setAuthMode("login");
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const initializeAuth = async () => {
+      const token = localStorage.getItem("ecosort_auth_token");
+      if (!token) {
+        if (!cancelled) setAuthLoading(false);
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.user) throw new Error("Session expired");
+        if (!cancelled) setCurrentUser(data.user);
+      } catch {
+        localStorage.removeItem("ecosort_auth_token");
+        if (!cancelled) setCurrentUser(null);
+      } finally {
+        if (!cancelled) setAuthLoading(false);
+      }
+    };
+
+    initializeAuth();
+    return () => { cancelled = true; };
   }, []);
 
   const loadData = useCallback(async () => {
@@ -303,8 +362,8 @@ function App() {
   }, [api]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    if (!authLoading && currentUser) loadData();
+  }, [authLoading, currentUser, loadData]);
 
   const navigate = (nextPage) => {
     setPage(nextPage);
@@ -322,6 +381,20 @@ function App() {
     setHistory([]);
   }, []);
 
+  if (authLoading) return <AuthLoadingScreen />;
+
+  if (!currentUser) {
+    return (
+      <AuthScreen
+        mode={authMode}
+        setMode={setAuthMode}
+        api={api}
+        onSuccess={handleAuthSuccess}
+        showToast={showToast}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
       <AmbientBackground />
@@ -336,6 +409,8 @@ function App() {
         notificationsOpen={notificationsOpen}
         setNotificationsOpen={setNotificationsOpen}
         queueCount={queue.length}
+        currentUser={currentUser}
+        onLogout={handleLogout}
       />
 
       <main className="app-main">
@@ -382,16 +457,29 @@ function App() {
           />
         )}
 
-        {page === "review" && (
-          <ReviewPage
-            queue={queue}
-            loading={loading}
-            api={api}
-            showToast={showToast}
-            reloadData={loadData}
-            openResult={openResult}
-          />
-        )}
+        {page === "review" && currentUser?.role === "admin" && (
+  <ReviewPage
+    queue={queue}
+    loading={loading}
+    api={api}
+    showToast={showToast}
+    reloadData={loadData}
+    openResult={openResult}
+  />
+)}
+
+{page === "review" && currentUser?.role !== "admin" && (
+  <OverviewPage
+    stats={stats}
+    history={history}
+    queue={[]}
+    health={health}
+    loading={loading}
+    categories={categories}
+    navigate={navigate}
+    openResult={openResult}
+  />
+)}
 
         {page === "insights" && (
           <InsightsPage
@@ -426,6 +514,90 @@ function App() {
       )}
 
       {toast && <Toast {...toast} />}
+    </div>
+  );
+}
+
+function AuthLoadingScreen() {
+  return (
+    <div className="auth-loading-screen">
+      <div className="auth-loading-card">
+        <div className="brand-mark"><Icon name="recycle" size={22} /></div>
+        <strong>Loading EcoSort</strong>
+        <span>Securing your workspace…</span>
+      </div>
+    </div>
+  );
+}
+
+function AuthScreen({ mode, setMode, api, onSuccess, showToast }) {
+  const isSignup = mode === "signup";
+  const [form, setForm] = useState({ full_name: "", email: "", password: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const update = (field, value) => {
+    setForm((current) => ({ ...current, [field]: value }));
+    setError("");
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (submitting) return;
+    if (isSignup && form.full_name.trim().length < 2) return setError("Please enter your full name.");
+    if (!form.email.trim()) return setError("Please enter your email address.");
+    if (form.password.length < 8) return setError("Password must be at least 8 characters.");
+
+    setSubmitting(true);
+    setError("");
+    try {
+      const data = await api(isSignup ? "/auth/signup" : "/auth/login", {
+        method: "POST",
+        body: JSON.stringify(
+          isSignup
+            ? { full_name: form.full_name.trim(), email: form.email.trim(), password: form.password }
+            : { email: form.email.trim(), password: form.password }
+        ),
+      });
+      onSuccess(data);
+      showToast(isSignup ? "Account created successfully." : "Welcome back to EcoSort.");
+    } catch (err) {
+      setError(err.message || "Unable to continue right now.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="auth-screen">
+      <AmbientBackground />
+      <div className="auth-shell">
+        <div className="auth-brand">
+          <span className="brand-mark"><Icon name="recycle" size={21} /></span>
+          <span><strong>EcoSort</strong><small>AI WASTE INTELLIGENCE</small></span>
+        </div>
+        <section className="auth-card">
+          <div className="auth-card-copy">
+            <span className="small-eyebrow">{isSignup ? "CREATE ACCOUNT" : "WELCOME BACK"}</span>
+            <h1>{isSignup ? "Start sorting smarter." : "Sign in to EcoSort."}</h1>
+            <p>{isSignup ? "Create your workspace account and keep every waste decision in one place." : "Access your waste intelligence workspace, scan history and trusted decisions."}</p>
+          </div>
+          <form className="auth-form" onSubmit={submit}>
+            {isSignup && (
+              <label><span>Full name</span><input value={form.full_name} onChange={(event) => update("full_name", event.target.value)} placeholder="Your name" autoComplete="name" /></label>
+            )}
+            <label><span>Email</span><input type="email" value={form.email} onChange={(event) => update("email", event.target.value)} placeholder="you@example.com" autoComplete="email" /></label>
+            <label><span>Password</span><input type="password" value={form.password} onChange={(event) => update("password", event.target.value)} placeholder="Minimum 8 characters" autoComplete={isSignup ? "new-password" : "current-password"} /></label>
+            {error && <div className="auth-error">{error}</div>}
+            <button className="primary-button auth-submit" disabled={submitting}>{submitting ? "Please wait…" : isSignup ? "Create account" : "Sign in"}{!submitting && <Icon name="arrow" size={16} />}</button>
+          </form>
+          <div className="auth-switch">
+            <span>{isSignup ? "Already have an account?" : "New to EcoSort?"}</span>
+            <button type="button" onClick={() => { setMode(isSignup ? "login" : "signup"); setError(""); }}>{isSignup ? "Sign in" : "Create an account"}</button>
+          </div>
+          <div className="auth-note"><Icon name="shield" size={15} /><span>Your password is protected and never shown in the dashboard.</span></div>
+        </section>
+      </div>
     </div>
   );
 }
@@ -562,7 +734,39 @@ function ProductLayoutFixes() {
       .onboarding-actions { display: flex; align-items: center; gap: 15px; }
       .onboarding-actions > span { color: #87958f; font-size: 13px; }
 
+      .auth-screen { min-height: 100vh; position: relative; display: flex; align-items: center; justify-content: center; padding: 32px; overflow: hidden; }
+      .auth-shell { width: min(520px, 100%); position: relative; z-index: 2; }
+      .auth-brand { display: flex; align-items: center; gap: 11px; justify-content: center; margin: 0 auto 22px; }
+      .auth-brand > span:last-child { display: flex; flex-direction: column; }
+      .auth-brand strong { font-size: 19px; line-height: 1; }
+      .auth-brand small { margin-top: 5px; font-size: 9px; letter-spacing: .16em; color: #81928b; }
+      .auth-card { background: rgba(255,255,255,.93); border: 1px solid rgba(27,74,58,.12); border-radius: 28px; padding: 34px; box-shadow: 0 24px 80px rgba(16,49,38,.12); backdrop-filter: blur(14px); }
+      .auth-card-copy { text-align: center; }
+      .auth-card-copy h1 { margin: 12px 0; font-size: clamp(34px, 6vw, 50px); line-height: .98; letter-spacing: -.045em; }
+      .auth-card-copy p { margin: 0 auto; max-width: 420px; color: #6e7e77; line-height: 1.65; }
+      .auth-form { display: grid; gap: 16px; margin-top: 28px; }
+      .auth-form label { display: grid; gap: 8px; color: #30463d; font-size: 13px; font-weight: 600; }
+      .auth-form input { width: 100%; box-sizing: border-box; border: 1px solid #dbe7e1; border-radius: 13px; padding: 14px 15px; background: #fbfdfc; color: #13251f; font: inherit; outline: none; }
+      .auth-form input:focus { border-color: #6ea98f; box-shadow: 0 0 0 4px rgba(75,146,108,.08); }
+      .auth-submit { width: 100%; justify-content: center; margin-top: 4px; }
+      .auth-error { border: 1px solid #f1d3ca; background: #fff4f0; color: #9b5948; border-radius: 12px; padding: 11px 13px; font-size: 13px; line-height: 1.45; }
+      .auth-switch { display: flex; justify-content: center; align-items: center; gap: 7px; margin-top: 20px; color: #708079; font-size: 13px; }
+      .auth-switch button { border: 0; background: transparent; color: #176b53; font: inherit; font-weight: 700; cursor: pointer; padding: 0; }
+      .auth-note { display: flex; align-items: center; gap: 8px; justify-content: center; margin-top: 18px; color: #8a9791; font-size: 11px; text-align: center; }
+      .auth-loading-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f4f8f5; }
+      .auth-loading-card { display: flex; flex-direction: column; align-items: center; gap: 10px; color: #315149; }
+      .auth-loading-card span { color: #82918b; font-size: 13px; }
+      .user-menu { display: flex; align-items: center; gap: 9px; margin-left: 4px; }
+      .user-avatar { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #eaf5ef; color: #176b53; font-size: 12px; font-weight: 800; }
+      .user-menu-copy { display: flex; flex-direction: column; min-width: 0; }
+      .user-menu-copy strong { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #213831; }
+      .user-menu-copy span { font-size: 9px; color: #84938d; text-transform: uppercase; letter-spacing: .08em; }
+      .logout-button { border: 1px solid #dbe7e1; background: rgba(255,255,255,.72); border-radius: 10px; padding: 7px 9px; color: #566861; font: inherit; font-size: 11px; cursor: pointer; }
+      .logout-button:hover { border-color: #bcd5ca; color: #176b53; }
+
       @media (max-width: 900px) {
+        .user-menu-copy,
+        .logout-button { display: none; }
         .method-grid { grid-template-columns: repeat(2, minmax(0,1fr)) !important; }
         .waste-streams-grid { grid-template-columns: 1fr !important; }
         .insight-hero-grid { grid-template-columns: 1fr !important; }
@@ -606,6 +810,8 @@ function Header({
   notificationsOpen,
   setNotificationsOpen,
   queueCount,
+  currentUser,
+  onLogout,
 }) {
   return (
     <header className="topbar">
@@ -626,7 +832,7 @@ function Header({
         </button>
 
         <nav className={`desktop-nav ${mobileMenu ? "is-open" : ""}`}>
-          {NAV_ITEMS.map((item) => (
+          {NAV_ITEMS.filter((item) => !item.adminOnly || currentUser?.role === "admin").map((item) => (
             <button
               key={item.id}
               className={`nav-item ${page === item.id ? "active" : ""}`}
@@ -689,6 +895,17 @@ function Header({
                 </div>
               </div>
             )}
+          </div>
+
+          <div className="user-menu">
+            <div className="user-avatar">
+              {(currentUser?.full_name || "U").trim().charAt(0).toUpperCase()}
+            </div>
+            <div className="user-menu-copy">
+              <strong>{currentUser?.full_name || "User"}</strong>
+              <span>{currentUser?.role === "admin" ? "Administrator" : "User"}</span>
+            </div>
+            <button className="logout-button" onClick={onLogout}>Sign out</button>
           </div>
 
           <button

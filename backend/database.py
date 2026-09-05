@@ -1,4 +1,8 @@
+import hashlib
+import hmac
 import json
+import os
+import secrets
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -12,6 +16,15 @@ from typing import Any, Optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "eco_sort.db"
+
+# Authentication configuration
+PASSWORD_HASH_ALGORITHM = "sha256"
+PASSWORD_HASH_ITERATIONS = 200_000
+PASSWORD_SALT_BYTES = 16
+VALID_ROLES = {"user", "admin"}
+DEFAULT_ADMIN_EMAIL = os.getenv("ECOSORT_ADMIN_EMAIL", "admin@ecosort.local").strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv("ECOSORT_ADMIN_PASSWORD", "EcoSortAdmin@123")
+DEFAULT_ADMIN_NAME = os.getenv("ECOSORT_ADMIN_NAME", "EcoSort Administrator").strip() or "EcoSort Administrator"
 
 
 # ============================================================
@@ -143,6 +156,363 @@ def _row_to_prediction(row: sqlite3.Row) -> dict:
 
 
 # ============================================================
+# PASSWORD / USER HELPERS
+# ============================================================
+
+def _normalize_email(email: str) -> str:
+    """Normalize and validate an email address used as a login identifier."""
+    if email is None:
+        raise ValueError("email is required")
+
+    normalized = str(email).strip().lower()
+
+    if not normalized or "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"): 
+        raise ValueError("valid email is required")
+
+    return normalized
+
+
+def _normalize_role(role: Optional[str]) -> str:
+    """Normalize and validate an application role."""
+    normalized = str(role or "user").strip().lower()
+
+    if normalized not in VALID_ROLES:
+        raise ValueError("role must be user or admin")
+
+    return normalized
+
+
+def _validate_password(password: str) -> str:
+    """Validate a password before hashing."""
+    if password is None:
+        raise ValueError("password is required")
+
+    value = str(password)
+
+    if len(value) < 8:
+        raise ValueError("password must be at least 8 characters")
+
+    if len(value) > 128:
+        raise ValueError("password must not exceed 128 characters")
+
+    return value
+
+
+def hash_password(password: str) -> str:
+    """Create a salted PBKDF2 password hash suitable for database storage."""
+    password = _validate_password(password)
+    salt = secrets.token_bytes(PASSWORD_SALT_BYTES)
+    digest = hashlib.pbkdf2_hmac(
+        PASSWORD_HASH_ALGORITHM,
+        password.encode("utf-8"),
+        salt,
+        PASSWORD_HASH_ITERATIONS,
+    )
+
+    return (
+        f"pbkdf2_{PASSWORD_HASH_ALGORITHM}$"
+        f"{PASSWORD_HASH_ITERATIONS}$"
+        f"{salt.hex()}$"
+        f"{digest.hex()}"
+    )
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify a plaintext password against a stored PBKDF2 hash."""
+    if not password or not stored_hash:
+        return False
+
+    try:
+        algorithm_tag, iterations_text, salt_hex, digest_hex = str(stored_hash).split("$", 3)
+
+        if not algorithm_tag.startswith("pbkdf2_"):
+            return False
+
+        algorithm = algorithm_tag.removeprefix("pbkdf2_")
+        iterations = int(iterations_text)
+        salt = bytes.fromhex(salt_hex)
+        expected_digest = bytes.fromhex(digest_hex)
+
+        candidate_digest = hashlib.pbkdf2_hmac(
+            algorithm,
+            str(password).encode("utf-8"),
+            salt,
+            iterations,
+        )
+
+        return hmac.compare_digest(candidate_digest, expected_digest)
+    except (ValueError, TypeError, UnicodeError):
+        return False
+
+
+def _row_to_user(row: Optional[sqlite3.Row]) -> Optional[dict]:
+    """Convert a user row to a safe API-friendly dictionary."""
+    if not row:
+        return None
+
+    item = dict(row)
+    item.pop("password_hash", None)
+    item["is_active"] = bool(item.get("is_active", 0))
+    return item
+
+
+def get_user_by_email(email: str) -> Optional[dict]:
+    """Return one active/inactive user by email without exposing the password hash."""
+    normalized_email = _normalize_email(email)
+
+    with closing(get_connection()) as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE email = ?
+            """,
+            (normalized_email,),
+        ).fetchone()
+
+        return _row_to_user(row)
+
+
+def get_user_auth_record(email: str) -> Optional[dict]:
+    """Return the complete authentication record, including password_hash."""
+    normalized_email = _normalize_email(email)
+
+    with closing(get_connection()) as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE email = ?
+            """,
+            (normalized_email,),
+        ).fetchone()
+
+        return dict(row) if row else None
+
+
+def get_user_by_id(user_id: int) -> Optional[dict]:
+    """Return one user by numeric ID without exposing the password hash."""
+    try:
+        normalized_id = int(user_id)
+    except (TypeError, ValueError):
+        return None
+
+    if normalized_id <= 0:
+        return None
+
+    with closing(get_connection()) as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+
+        return _row_to_user(row)
+
+
+def create_user(
+    email: str,
+    password: str,
+    full_name: str,
+    role: str = "user",
+) -> dict:
+    """Create a user account and return its safe public record."""
+    normalized_email = _normalize_email(email)
+    normalized_role = _normalize_role(role)
+    normalized_name = str(full_name or "").strip()
+
+    if not normalized_name:
+        raise ValueError("full_name is required")
+
+    if len(normalized_name) > 120:
+        raise ValueError("full_name must not exceed 120 characters")
+
+    password_hash = hash_password(password)
+
+    with closing(get_connection()) as connection:
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO users (
+                    email,
+                    password_hash,
+                    full_name,
+                    role,
+                    is_active,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    normalized_email,
+                    password_hash,
+                    normalized_name,
+                    normalized_role,
+                    _now(),
+                ),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("A user with this email already exists.") from exc
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+
+        return _row_to_user(row) or {}
+
+
+def update_last_login(user_id: int) -> None:
+    """Record the latest successful login timestamp."""
+    try:
+        normalized_id = int(user_id)
+    except (TypeError, ValueError):
+        return
+
+    if normalized_id <= 0:
+        return
+
+    with closing(get_connection()) as connection:
+        connection.execute(
+            """
+            UPDATE users
+            SET last_login_at = ?
+            WHERE id = ?
+            """,
+            (_now(), normalized_id),
+        )
+        connection.commit()
+
+
+def list_users(limit: int = 100) -> list:
+    """Return users for admin management, without password hashes."""
+    limit = _safe_limit(limit, default=100, maximum=500)
+
+    with closing(get_connection()) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                id,
+                email,
+                full_name,
+                role,
+                is_active,
+                created_at,
+                last_login_at
+            FROM users
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        return [
+            _row_to_user(row)
+            for row in rows
+        ]
+
+
+def update_user_role(
+    user_id: int,
+    role: str,
+) -> Optional[dict]:
+    """Change a user's role and return the updated safe record."""
+    normalized_role = _normalize_role(role)
+
+    try:
+        normalized_id = int(user_id)
+    except (TypeError, ValueError):
+        return None
+
+    if normalized_id <= 0:
+        return None
+
+    with closing(get_connection()) as connection:
+        existing = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (normalized_id,),
+        ).fetchone()
+
+        if not existing:
+            return None
+
+        connection.execute(
+            """
+            UPDATE users
+            SET role = ?
+            WHERE id = ?
+            """,
+            (normalized_role, normalized_id),
+        )
+        connection.commit()
+
+        row = connection.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (normalized_id,),
+        ).fetchone()
+
+        return _row_to_user(row)
+
+
+def set_user_active(
+    user_id: int,
+    is_active: bool,
+) -> Optional[dict]:
+    """Activate or deactivate a user account."""
+    try:
+        normalized_id = int(user_id)
+    except (TypeError, ValueError):
+        return None
+
+    if normalized_id <= 0:
+        return None
+
+    with closing(get_connection()) as connection:
+        existing = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (normalized_id,),
+        ).fetchone()
+
+        if not existing:
+            return None
+
+        connection.execute(
+            """
+            UPDATE users
+            SET is_active = ?
+            WHERE id = ?
+            """,
+            (1 if bool(is_active) else 0, normalized_id),
+        )
+        connection.commit()
+
+        row = connection.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (normalized_id,),
+        ).fetchone()
+
+        return _row_to_user(row)
+
+
+def count_users() -> int:
+    """Return the total number of registered users."""
+    with closing(get_connection()) as connection:
+        return int(
+            connection.execute(
+                "SELECT COUNT(*) AS count FROM users"
+            ).fetchone()["count"]
+        )
+
+
+# ============================================================
 # DATABASE INITIALIZATION
 # ============================================================
 
@@ -154,6 +524,65 @@ def init_db() -> None:
     Missing columns are added automatically.
     """
     with closing(get_connection()) as connection:
+
+        # ----------------------------------------------------
+        # Users
+        # ----------------------------------------------------
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                last_login_at TEXT
+            )
+            """
+        )
+
+        # Normalize legacy or manually inserted invalid roles.
+        connection.execute(
+            """
+            UPDATE users
+            SET role = 'user'
+            WHERE role IS NULL
+               OR LOWER(role) NOT IN ('user', 'admin')
+            """
+        )
+
+        # Seed one development/admin account when the database is first created.
+        # Production deployments should override these values with environment
+        # variables: ECOSORT_ADMIN_EMAIL / ECOSORT_ADMIN_PASSWORD / ECOSORT_ADMIN_NAME.
+        if DEFAULT_ADMIN_EMAIL and DEFAULT_ADMIN_PASSWORD:
+            admin_exists = connection.execute(
+                "SELECT id FROM users WHERE email = ?",
+                (DEFAULT_ADMIN_EMAIL,),
+            ).fetchone()
+
+            if not admin_exists:
+                connection.execute(
+                    """
+                    INSERT INTO users (
+                        email,
+                        password_hash,
+                        full_name,
+                        role,
+                        is_active,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, 'admin', 1, ?)
+                    """,
+                    (
+                        DEFAULT_ADMIN_EMAIL,
+                        hash_password(DEFAULT_ADMIN_PASSWORD),
+                        DEFAULT_ADMIN_NAME,
+                        _now(),
+                    ),
+                )
 
         # ----------------------------------------------------
         # Predictions
@@ -192,7 +621,9 @@ def init_db() -> None:
 
                 reviewer_note TEXT,
 
-                verified_at TEXT
+                verified_at TEXT,
+
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
             )
             """
         )
@@ -248,6 +679,10 @@ def init_db() -> None:
                 "verified_at",
                 "TEXT",
             ),
+            (
+                "user_id",
+                "INTEGER REFERENCES users(id) ON DELETE SET NULL",
+            ),
         ]
 
         for column_name, column_definition in prediction_columns:
@@ -256,6 +691,20 @@ def init_db() -> None:
                 "predictions",
                 column_name,
                 column_definition,
+            )
+
+        # Backfill legacy predictions to admin so existing development
+        # history stays available only to the administrator. New users start
+        # with zero records because their predictions use their own user_id.
+        admin_row = connection.execute(
+            "SELECT id FROM users WHERE email = ? LIMIT 1",
+            (DEFAULT_ADMIN_EMAIL,),
+        ).fetchone()
+
+        if admin_row and _column_exists(connection, "predictions", "user_id"):
+            connection.execute(
+                "UPDATE predictions SET user_id = ? WHERE user_id IS NULL",
+                (admin_row["id"],),
             )
 
         feedback_columns = [
@@ -326,6 +775,7 @@ def save_prediction(
     quality_score=None,
     quality_status=None,
     review_status=None,
+    user_id=None,
 ):
     """
     Save one AI prediction to the database.
@@ -378,9 +828,10 @@ def save_prediction(
                 created_at,
                 quality_score,
                 quality_status,
-                review_status
+                review_status,
+                user_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 prediction_id,
@@ -398,6 +849,7 @@ def save_prediction(
                 quality_score,
                 quality_status,
                 review_status,
+                user_id,
             ),
         )
 
@@ -416,6 +868,7 @@ def get_history(
     min_confidence=None,
     max_confidence=None,
     sort="newest",
+    user_id=None,
 ):
     """
     Retrieve prediction history with filtering and sorting.
@@ -455,6 +908,10 @@ def get_history(
         """
 
         params = []
+
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(int(user_id))
 
         # ----------------------------------------------------
         # Search
@@ -575,7 +1032,7 @@ def get_history(
 # SINGLE PREDICTION
 # ============================================================
 
-def get_prediction(prediction_id):
+def get_prediction(prediction_id, user_id=None):
     """
     Retrieve one prediction by its public prediction ID.
     """
@@ -590,8 +1047,9 @@ def get_prediction(prediction_id):
             SELECT *
             FROM predictions
             WHERE prediction_id = ?
+              AND (? IS NULL OR user_id = ?)
             """,
-            (prediction_id,),
+            (prediction_id, user_id, user_id),
         ).fetchone()
 
         if not row:
@@ -688,7 +1146,7 @@ def verify_prediction(
 # REVIEW QUEUE
 # ============================================================
 
-def get_review_queue(limit=100):
+def get_review_queue(limit=100, user_id=None):
     """
     Retrieve predictions currently waiting for manual review.
 
@@ -708,10 +1166,11 @@ def get_review_queue(limit=100):
             SELECT *
             FROM predictions
             WHERE review_status = 'pending'
+              AND (? IS NULL OR user_id = ?)
             ORDER BY confidence ASC, id DESC
             LIMIT ?
             """,
-            (limit,),
+            (user_id, user_id, limit),
         ).fetchall()
 
         return [
@@ -896,7 +1355,7 @@ def save_feedback(
 # FEEDBACK STATS
 # ============================================================
 
-def get_feedback_stats():
+def get_feedback_stats(user_id=None):
     """
     Return aggregate user-feedback statistics.
     """
@@ -906,24 +1365,33 @@ def get_feedback_stats():
         total_feedback = connection.execute(
             """
             SELECT COUNT(*) AS count
-            FROM feedback
-            """
+            FROM feedback f
+            JOIN predictions p ON p.prediction_id = f.prediction_id
+            WHERE (? IS NULL OR p.user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         correct_feedback = connection.execute(
             """
             SELECT COUNT(*) AS count
-            FROM feedback
-            WHERE is_correct = 1
-            """
+            FROM feedback f
+            JOIN predictions p ON p.prediction_id = f.prediction_id
+            WHERE f.is_correct = 1
+              AND (? IS NULL OR p.user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         incorrect_feedback = connection.execute(
             """
             SELECT COUNT(*) AS count
-            FROM feedback
-            WHERE is_correct = 0
-            """
+            FROM feedback f
+            JOIN predictions p ON p.prediction_id = f.prediction_id
+            WHERE f.is_correct = 0
+              AND (? IS NULL OR p.user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
     feedback_rate = None
@@ -949,7 +1417,7 @@ def get_feedback_stats():
 # MAIN STATS
 # ============================================================
 
-def get_stats():
+def get_stats(user_id=None):
     """
     Return dashboard-level prediction statistics.
 
@@ -967,7 +1435,9 @@ def get_stats():
             """
             SELECT COUNT(*) AS count
             FROM predictions
-            """
+            WHERE (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         # ----------------------------------------------------
@@ -979,7 +1449,9 @@ def get_stats():
             SELECT COUNT(*) AS count
             FROM predictions
             WHERE category = 'Recyclable'
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         organic = connection.execute(
@@ -987,7 +1459,9 @@ def get_stats():
             SELECT COUNT(*) AS count
             FROM predictions
             WHERE category = 'Organic'
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         hazardous = connection.execute(
@@ -995,7 +1469,9 @@ def get_stats():
             SELECT COUNT(*) AS count
             FROM predictions
             WHERE category = 'Hazardous'
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         # ----------------------------------------------------
@@ -1007,7 +1483,9 @@ def get_stats():
             SELECT COUNT(*) AS count
             FROM predictions
             WHERE confidence >= 90
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         review_recommended = connection.execute(
@@ -1016,7 +1494,9 @@ def get_stats():
             FROM predictions
             WHERE confidence >= 75
               AND confidence < 90
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         # ----------------------------------------------------
@@ -1028,7 +1508,9 @@ def get_stats():
             SELECT COUNT(*) AS count
             FROM predictions
             WHERE review_status = 'pending'
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         verified = connection.execute(
@@ -1036,7 +1518,9 @@ def get_stats():
             SELECT COUNT(*) AS count
             FROM predictions
             WHERE review_status = 'verified'
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         # ----------------------------------------------------
@@ -1048,7 +1532,9 @@ def get_stats():
             SELECT COUNT(*) AS count
             FROM predictions
             WHERE DATE(created_at) = DATE('now')
-            """
+              AND (? IS NULL OR user_id = ?)
+            """,
+            (user_id, user_id),
         ).fetchone()["count"]
 
         # ----------------------------------------------------
@@ -1059,10 +1545,12 @@ def get_stats():
             """
             SELECT category, COUNT(*) AS count
             FROM predictions
+            WHERE (? IS NULL OR user_id = ?)
             GROUP BY category
             ORDER BY count DESC
             LIMIT 1
-            """
+            """,
+            (user_id, user_id),
         ).fetchone()
 
     # --------------------------------------------------------
