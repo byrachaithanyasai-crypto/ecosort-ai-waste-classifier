@@ -2109,12 +2109,13 @@ function ResultPage({
             <div className="prediction-list">
               {(result.top_predictions || result.top_3 || []).map(
                 (prediction, index) => {
-                  const name =
-                    prediction.class ||
-                    prediction.label ||
-                    prediction.category ||
-                    prediction.name ||
-                    "Unknown";
+                 const name =
+                  prediction.detected_item ||
+                  prediction.class ||
+                  prediction.label ||
+                  prediction.category ||
+                  prediction.name ||
+                  "Unknown";
 
                   const probability = Number(
                     prediction.confidence ??
