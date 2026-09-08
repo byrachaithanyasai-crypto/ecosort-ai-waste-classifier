@@ -819,7 +819,7 @@ app.add_middleware(
         origin.strip()
         for origin in os.getenv(
             "ECOSORT_ALLOWED_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
+            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://ecosort-ai-waste-classifier.vercel.app",
         ).split(",")
         if origin.strip()
     ],
