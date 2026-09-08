@@ -424,7 +424,7 @@ textarea {
   line-height: 0.98;
   letter-spacing: -0.055em;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink) !important;
 }
 
 .hero-copy h1 span {
@@ -1285,7 +1285,7 @@ textarea {
   line-height: 1;
   letter-spacing: -0.055em;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink) !important;
 }
 
 .page-intro p {
@@ -4009,7 +4009,7 @@ textarea {
   line-height: 0.98;
   letter-spacing: -0.055em;
   font-weight: 600;
-  color: var(--ink);
+ color: var(--ink) !important;
 }
 
 .hero-copy h1 span {
@@ -4867,7 +4867,7 @@ textarea {
   line-height: 1;
   letter-spacing: -0.055em;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink) !important;
 }
 
 .page-intro p {
