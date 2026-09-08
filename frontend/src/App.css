@@ -8315,3 +8315,15 @@ body,
     forced-color-adjust: none;
   }
 }
+/* FINAL ONBOARDING + PAGE HEADING VISIBILITY FIX */
+.onboarding-copy h1,
+.hero-copy h1,
+.page-intro h1 {
+  color: #10251f !important;
+  -webkit-text-fill-color: #10251f !important;
+}
+
+.hero-copy h1 span {
+  color: #1d6b51 !important;
+  -webkit-text-fill-color: #1d6b51 !important;
+}
