@@ -23,6 +23,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
     Request,
+    Form,
 )
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +41,12 @@ from .database import (
     save_feedback,
     save_prediction,
     verify_prediction,
+    set_user_organization_unit,
+    get_gamification_summary,
+    award_gamification_points,
+    get_gamification_leaderboard,
+    save_bin_fill_estimate,
+    get_bin_fill_history,
 )
 
 
@@ -108,11 +115,20 @@ class AuthCredentials(BaseModel):
 
 class SignupRequest(AuthCredentials):
     full_name: str = Field(min_length=2, max_length=120)
+    organization_unit: str = Field(default="General", min_length=1, max_length=120)
 
 
 class AdminUserUpdate(BaseModel):
     role: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+class GamificationProfileUpdate(BaseModel):
+    organization_unit: str = Field(min_length=1, max_length=120)
+
+
+class GamificationAwardRequest(BaseModel):
+    prediction_id: str = Field(min_length=1, max_length=120)
 
 
 def _b64encode(value: bytes) -> str:
@@ -224,10 +240,16 @@ def _ensure_auth_tables() -> None:
 
 
 def _public_user(row) -> dict:
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
     return {
         "id": int(row["id"]),
         "email": row["email"],
         "full_name": row["full_name"],
+        "organization_unit": (
+            str(row["organization_unit"] or "General")
+            if "organization_unit" in keys
+            else "General"
+        ),
         "role": row["role"],
         "is_active": bool(row["is_active"]),
         "created_at": row["created_at"],
@@ -800,8 +822,8 @@ app = FastAPI(
     description=(
         "AI-powered waste classification API "
         "with image quality analysis, confidence "
-        "monitoring, history, feedback and "
-        "manual verification."
+        "monitoring, history, feedback, manual "
+        "verification, gamification and bin fill estimation."
     ),
 
     lifespan=lifespan,
@@ -819,7 +841,7 @@ app.add_middleware(
         origin.strip()
         for origin in os.getenv(
             "ECOSORT_ALLOWED_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://ecosort-ai-waste-classifier.vercel.app",
+             "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://ecosort-ai-waste-classifier.vercel.app,https://localhost,capacitor://localhost",
         ).split(",")
         if origin.strip()
     ],
@@ -1414,10 +1436,16 @@ async def auth_signup(payload: SignupRequest):
         cursor = connection.execute(
             """
             INSERT INTO users (
-                email, password_hash, full_name, role, is_active, created_at
-            ) VALUES (?, ?, ?, 'user', 1, ?)
+                email, password_hash, full_name, organization_unit, role, is_active, created_at
+            ) VALUES (?, ?, ?, ?, 'user', 1, ?)
             """,
-            (email, _hash_password(password), full_name, _now()),
+            (
+                email,
+                _hash_password(password),
+                full_name,
+                str(payload.organization_unit or "General").strip()[:120] or "General",
+                _now(),
+            ),
         )
         connection.commit()
         row = connection.execute(
@@ -1796,6 +1824,12 @@ def api_info():
                 REVIEW_RECOMMENDED_THRESHOLD
             ),
         },
+        "round2_features": {
+            "gamification": True,
+            "department_or_hostel_tracking": True,
+            "bin_fill_estimation": True,
+            "bin_fill_is_an_estimate": True,
+        },
     }
 
 
@@ -1898,10 +1932,17 @@ async def analyze_image(
 @app.post("/predict")
 async def predict_waste(
     file: UploadFile = File(...),
+    organization_unit: Optional[str] = Form(default=None),
     request: Request = None,
 ):
 
     current_user = _require_user(request)
+
+    selected_organization_unit = (
+        str(organization_unit or "").strip()[:120]
+        or str(current_user.get("organization_unit") or "General").strip()[:120]
+        or "General"
+    )
 
     start_time = (
         time.perf_counter()
@@ -2270,6 +2311,7 @@ async def predict_waste(
                 review_status
             ),
             user_id=int(current_user["id"]),
+            organization_unit=selected_organization_unit,
         )
 
 
@@ -2303,6 +2345,8 @@ async def predict_waste(
         ),
 
         "prediction_id": prediction_id,
+
+        "organization_unit": selected_organization_unit,
 
         "detected_item": detected_item,
 
@@ -2994,6 +3038,252 @@ async def verify(
     }
 
 
+
+# ============================================================
+# ROUND 2 - GAMIFICATION
+# ============================================================
+
+@app.patch("/gamification/profile")
+async def gamification_profile(
+    payload: GamificationProfileUpdate,
+    request: Request = None,
+):
+    user = _require_user(request)
+    unit = str(payload.organization_unit or "General").strip()
+    if not unit:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "organization_unit_required", "message": "Department or hostel block is required."},
+        )
+
+    updated = set_user_organization_unit(int(user["id"]), unit)
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "user_not_found", "message": "User not found."},
+        )
+
+    return {
+        "message": "Organization unit updated successfully.",
+        "user": updated,
+    }
+
+
+@app.get("/gamification/me")
+def gamification_me(request: Request):
+    user = _require_user(request)
+    return get_gamification_summary(int(user["id"]))
+
+
+@app.post("/gamification/award")
+async def gamification_award(
+    payload: GamificationAwardRequest,
+    request: Request = None,
+):
+    user = _require_user(request)
+    prediction_id = payload.prediction_id.strip()
+
+    prediction = get_prediction(
+        prediction_id,
+        user_id=int(user["id"]),
+    )
+    if not prediction:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "prediction_not_found",
+                "message": "Prediction not found for the authenticated user.",
+            },
+        )
+
+    # The user explicitly confirms the disposal action in the UI.
+    # The reward destination can be chosen in GreenPoints; when omitted,
+    # the authenticated user's saved organization_unit is used.
+    # IMPORTANT: organization_unit is intentionally NOT accepted here.
+    # The destination was frozen when this prediction was created.
+    try:
+        result = award_gamification_points(
+            user_id=int(user["id"]),
+            prediction_id=prediction_id,
+            points=10,
+            action="correct_disposal",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "reward_invalid", "message": str(exc)},
+        )
+    except Exception:
+        logger.exception("Failed to award gamification points.")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "reward_failed", "message": "Unable to award points right now."},
+        )
+
+    return {
+        "message": "GreenPoints processed successfully.",
+        **result,
+    }
+
+
+@app.get("/gamification/leaderboard")
+def gamification_leaderboard(limit: int = 10, request: Request = None):
+    _require_user(request)
+    return {
+        "count": len(get_gamification_leaderboard(limit)),
+        "items": get_gamification_leaderboard(limit),
+    }
+
+
+# ============================================================
+# ROUND 2 - IMAGE-BASED BIN FILL ESTIMATION
+# ============================================================
+
+def calculate_bin_fill_estimate(image: Image.Image) -> dict:
+    """Estimate bin fill level from visual density/edge changes in the same image.
+
+    This is intentionally presented as an image-based estimate, not a calibrated
+    sensor measurement. It looks for the strongest vertical transition between
+    a relatively empty upper bin region and a denser lower/content region.
+    """
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+
+    # Focus on the central bin area to reduce background influence.
+    left = int(width * 0.15)
+    right = int(width * 0.85)
+    top = int(height * 0.10)
+    bottom = int(height * 0.95)
+    crop = rgb.crop((left, top, right, bottom))
+
+    gray = crop.convert("L")
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edge_stat = ImageStat.Stat(edges)
+    global_edge = float(edge_stat.mean[0])
+
+    # Row-wise detail and tone variance.
+    row_scores = []
+    row_count = max(1, gray.height)
+    for y in range(row_count):
+        band_height = max(1, int(row_count * 0.02))
+        y2 = min(row_count, y + band_height)
+        gray_band = gray.crop((0, y, gray.width, y2))
+        edge_band = edges.crop((0, y, edges.width, y2))
+        contrast = float(ImageStat.Stat(gray_band).stddev[0])
+        detail = float(ImageStat.Stat(edge_band).mean[0])
+        row_scores.append((0.6 * detail) + (0.4 * contrast))
+
+    # Smooth the row scores so isolated texture doesn't dominate.
+    window = max(3, row_count // 30)
+    smoothed = []
+    for index in range(row_count):
+        start = max(0, index - window)
+        end = min(row_count, index + window + 1)
+        smoothed.append(sum(row_scores[start:end]) / max(1, end - start))
+
+    # Strong upward transition: lower area is visually denser than upper area.
+    best_transition = int(row_count * 0.55)
+    best_gain = float("-inf")
+    for index in range(int(row_count * 0.20), int(row_count * 0.90)):
+        upper = smoothed[:index]
+        lower = smoothed[index:]
+        if not upper or not lower:
+            continue
+        upper_mean = sum(upper) / len(upper)
+        lower_mean = sum(lower) / len(lower)
+        gain = lower_mean - upper_mean
+        if gain > best_gain:
+            best_gain = gain
+            best_transition = index
+
+    # Convert transition position to fill percentage.
+    fill_level = ((row_count - best_transition) / row_count) * 100.0
+
+    # Use visual density as a small corrective factor.
+    if global_edge > 22:
+        fill_level += 8
+    elif global_edge < 7:
+        fill_level -= 8
+
+    fill_level = max(0.0, min(100.0, fill_level))
+
+    # Estimate reliability from transition strength and overall visual detail.
+    confidence = 55.0 + min(30.0, max(0.0, best_gain) * 1.5)
+    confidence += min(10.0, max(0.0, global_edge - 8.0) * 0.25)
+    confidence = max(50.0, min(95.0, confidence))
+
+    if fill_level < 25:
+        status = "Low"
+        recommendation = "Collection is not urgent; continue monitoring fill level."
+    elif fill_level < 50:
+        status = "Medium"
+        recommendation = "Monitor the bin and schedule routine collection."
+    elif fill_level < 75:
+        status = "High"
+        recommendation = "Plan collection soon to avoid overflow risk."
+    else:
+        status = "Nearly Full"
+        recommendation = "Prioritize collection soon to prevent overflow."
+
+    return {
+        "fill_level": round(fill_level, 1),
+        "status": status,
+        "recommendation": recommendation,
+        "confidence": round(confidence, 1),
+        "method": "image_based_visual_estimate",
+    }
+
+
+@app.post("/bin/fill-estimate")
+async def bin_fill_estimate(
+    file: UploadFile = File(...),
+    request: Request = None,
+):
+    user = _require_user(request)
+    _, image = await read_image_upload(file)
+
+    estimate = calculate_bin_fill_estimate(image)
+
+    try:
+        record_id = save_bin_fill_estimate(
+            user_id=int(user["id"]),
+            filename=file.filename,
+            fill_level=estimate["fill_level"],
+            status=estimate["status"],
+            recommendation=estimate["recommendation"],
+            confidence=estimate["confidence"],
+        )
+    except Exception:
+        logger.exception("Failed to save bin fill estimate.")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "bin_estimate_save_failed",
+                "message": "Bin-fill estimate was calculated but could not be saved.",
+            },
+        )
+
+    return {
+        "message": "Bin fill level estimated successfully.",
+        "estimate_id": record_id,
+        **estimate,
+    }
+
+
+@app.get("/bin/fill-history")
+def bin_fill_history(limit: int = 20, request: Request = None):
+    scoped_user_id = _data_scope_user_id(request)
+    items = get_bin_fill_history(
+        user_id=scoped_user_id,
+        limit=limit,
+    )
+    return {
+        "count": len(items),
+        "limit": max(1, min(int(limit or 20), 100)),
+        "items": items,
+    }
+
+
 # ============================================================
 # STATUS
 # ============================================================
@@ -3048,5 +3338,11 @@ def endpoints():
             "/review-queue",
             "/feedback",
             "/verify/{prediction_id}",
+            "/gamification/profile",
+            "/gamification/me",
+            "/gamification/award",
+            "/gamification/leaderboard",
+            "/bin/fill-estimate",
+            "/bin/fill-history",
         ]
     }

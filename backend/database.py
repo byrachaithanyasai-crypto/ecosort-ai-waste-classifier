@@ -253,6 +253,9 @@ def _row_to_user(row: Optional[sqlite3.Row]) -> Optional[dict]:
     item = dict(row)
     item.pop("password_hash", None)
     item["is_active"] = bool(item.get("is_active", 0))
+    item["organization_unit"] = str(
+        item.get("organization_unit") or "General"
+    ).strip() or "General"
     return item
 
 
@@ -318,11 +321,14 @@ def create_user(
     password: str,
     full_name: str,
     role: str = "user",
+    organization_unit: str = "General",
 ) -> dict:
     """Create a user account and return its safe public record."""
     normalized_email = _normalize_email(email)
     normalized_role = _normalize_role(role)
     normalized_name = str(full_name or "").strip()
+    normalized_unit = str(organization_unit or "General").strip() or "General"
+    normalized_unit = normalized_unit[:120]
 
     if not normalized_name:
         raise ValueError("full_name is required")
@@ -340,16 +346,18 @@ def create_user(
                     email,
                     password_hash,
                     full_name,
+                    organization_unit,
                     role,
                     is_active,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     normalized_email,
                     password_hash,
                     normalized_name,
+                    normalized_unit,
                     normalized_role,
                     _now(),
                 ),
@@ -536,6 +544,7 @@ def init_db() -> None:
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 full_name TEXT NOT NULL,
+                organization_unit TEXT NOT NULL DEFAULT 'General',
                 role TEXT NOT NULL DEFAULT 'user',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
@@ -654,7 +663,105 @@ def init_db() -> None:
         # Migration support for existing databases
         # ----------------------------------------------------
 
+        # ----------------------------------------------------
+        # Round 2: organization unit for gamification grouping
+        # ----------------------------------------------------
+
+        _add_column_if_missing(
+            connection,
+            "users",
+            "organization_unit",
+            "TEXT NOT NULL DEFAULT 'General'",
+        )
+
+        _add_column_if_missing(
+            connection,
+            "predictions",
+            "organization_unit",
+            "TEXT NOT NULL DEFAULT 'General'",
+        )
+
+        connection.execute(
+            """
+            UPDATE predictions
+            SET organization_unit = 'General'
+            WHERE organization_unit IS NULL
+               OR TRIM(organization_unit) = ''
+            """
+        )
+
+        connection.execute(
+            """
+            UPDATE users
+            SET organization_unit = 'General'
+            WHERE organization_unit IS NULL
+               OR TRIM(organization_unit) = ''
+            """
+        )
+
+        # ----------------------------------------------------
+        # Round 2: gamification rewards
+        # ----------------------------------------------------
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gamification_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                prediction_id TEXT NOT NULL UNIQUE REFERENCES predictions(prediction_id) ON DELETE CASCADE,
+                organization_unit TEXT NOT NULL DEFAULT 'General',
+                points INTEGER NOT NULL DEFAULT 10 CHECK(points > 0),
+                action TEXT NOT NULL DEFAULT 'correct_disposal',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gamification_rewards_user
+            ON gamification_rewards(user_id)
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_gamification_rewards_unit
+            ON gamification_rewards(organization_unit)
+            """
+        )
+
+        # ----------------------------------------------------
+        # Round 2: bin fill estimates
+        # ----------------------------------------------------
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bin_fill_estimates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                filename TEXT,
+                fill_level REAL NOT NULL,
+                status TEXT NOT NULL,
+                recommendation TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bin_fill_estimates_created
+            ON bin_fill_estimates(created_at DESC)
+            """
+        )
+
         prediction_columns = [
+            (
+                "organization_unit",
+                "TEXT DEFAULT 'General'",
+            ),
             (
                 "quality_score",
                 "REAL",
@@ -776,6 +883,7 @@ def save_prediction(
     quality_status=None,
     review_status=None,
     user_id=None,
+    organization_unit="General",
 ):
     """
     Save one AI prediction to the database.
@@ -829,9 +937,10 @@ def save_prediction(
                 quality_score,
                 quality_status,
                 review_status,
-                user_id
+                user_id,
+                organization_unit
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 prediction_id,
@@ -850,6 +959,7 @@ def save_prediction(
                 quality_status,
                 review_status,
                 user_id,
+                str(organization_unit or "General").strip()[:120] or "General",
             ),
         )
 
@@ -1622,3 +1732,285 @@ def clear_predictions():
         )
 
         connection.commit()
+
+# ============================================================
+# ROUND 2 - GAMIFICATION
+# ============================================================
+
+def set_user_organization_unit(user_id: int, organization_unit: str) -> Optional[dict]:
+    """Set a user's department/hostel block grouping."""
+    try:
+        normalized_id = int(user_id)
+    except (TypeError, ValueError):
+        return None
+
+    unit = str(organization_unit or "General").strip()
+    if not unit:
+        unit = "General"
+    unit = unit[:120]
+
+    with closing(get_connection()) as connection:
+        existing = connection.execute(
+            "SELECT id FROM users WHERE id = ? LIMIT 1",
+            (normalized_id,),
+        ).fetchone()
+        if not existing:
+            return None
+
+        connection.execute(
+            "UPDATE users SET organization_unit = ? WHERE id = ?",
+            (unit, normalized_id),
+        )
+
+        # Only update the user's default destination.
+        # Existing reward rows keep the unit they were originally awarded to.
+        connection.commit()
+
+        row = connection.execute(
+            "SELECT * FROM users WHERE id = ? LIMIT 1",
+            (normalized_id,),
+        ).fetchone()
+
+    return _row_to_user(row)
+
+
+def get_gamification_summary(user_id: int) -> dict:
+    """Return a user's points, rank, unit, and recent rewards."""
+    normalized_id = int(user_id)
+    with closing(get_connection()) as connection:
+        user = connection.execute(
+            "SELECT id, full_name, organization_unit FROM users WHERE id = ? LIMIT 1",
+            (normalized_id,),
+        ).fetchone()
+        if not user:
+            return {
+                "points": 0,
+                "rank": None,
+                "organization_unit": "General",
+                "recent_rewards": [],
+            }
+
+        points_row = connection.execute(
+            """
+            SELECT COALESCE(SUM(points), 0) AS total
+            FROM gamification_rewards
+            WHERE user_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+        points = int(points_row["total"] or 0)
+
+        rank_row = connection.execute(
+            """
+            SELECT rank FROM (
+                SELECT
+                    user_id,
+                    RANK() OVER (ORDER BY SUM(points) DESC) AS rank
+                FROM gamification_rewards
+                GROUP BY user_id
+            ) ranked
+            WHERE user_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+
+        recent = connection.execute(
+            """
+            SELECT prediction_id, points, action, organization_unit, created_at
+            FROM gamification_rewards
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 5
+            """,
+            (normalized_id,),
+        ).fetchall()
+
+    return {
+        "points": points,
+        "rank": int(rank_row["rank"]) if rank_row else None,
+        "organization_unit": str(user["organization_unit"] or "General"),
+        "recent_rewards": [dict(row) for row in recent],
+    }
+
+
+def award_gamification_points(
+    user_id: int,
+    prediction_id: str,
+    organization_unit: str = "General",
+    points: int = 10,
+    action: str = "correct_disposal",
+) -> dict:
+    """Award points once for a prediction; duplicate rewards are blocked by a unique key."""
+    normalized_user_id = int(user_id)
+    normalized_prediction_id = str(prediction_id or "").strip()
+    if not normalized_prediction_id:
+        raise ValueError("prediction_id is required")
+
+    normalized_points = max(1, min(int(points), 100))
+    normalized_action = str(action or "correct_disposal").strip()[:80] or "correct_disposal"
+    normalized_unit = str(organization_unit or "").strip()[:120]
+    if not normalized_unit:
+        normalized_unit = "General"
+
+    with closing(get_connection()) as connection:
+        user = connection.execute(
+            "SELECT organization_unit FROM users WHERE id = ? LIMIT 1",
+            (normalized_user_id,),
+        ).fetchone()
+        if not user:
+            raise ValueError("User not found")
+
+        prediction = connection.execute(
+            """
+            SELECT
+                prediction_id,
+                user_id,
+                category,
+                final_category,
+                review_status,
+                organization_unit
+            FROM predictions
+            WHERE prediction_id = ?
+            LIMIT 1
+            """,
+            (normalized_prediction_id,),
+        ).fetchone()
+        if not prediction:
+            raise ValueError("Prediction not found")
+        if prediction["user_id"] is None or int(prediction["user_id"]) != normalized_user_id:
+            raise ValueError("Prediction does not belong to the authenticated user")
+
+        # The reward destination is frozen at prediction time.
+        frozen_unit = str(prediction["organization_unit"] or "General").strip()[:120] or "General"
+        normalized_unit = frozen_unit
+
+        existing = connection.execute(
+            """
+            SELECT id, points, organization_unit
+            FROM gamification_rewards
+            WHERE prediction_id = ?
+            LIMIT 1
+            """,
+            (normalized_prediction_id,),
+        ).fetchone()
+        if existing:
+            summary = get_gamification_summary(normalized_user_id)
+            summary.update({
+                "awarded": False,
+                "duplicate": True,
+                "points_awarded": 0,
+                "prediction_id": normalized_prediction_id,
+                "organization_unit": str(existing["organization_unit"] if "organization_unit" in existing.keys() else organization_unit),
+            })
+            return summary
+
+        connection.execute(
+            """
+            INSERT INTO gamification_rewards (
+                user_id, prediction_id, organization_unit, points, action, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_user_id,
+                normalized_prediction_id,
+                normalized_unit,
+                normalized_points,
+                normalized_action,
+                _now(),
+            ),
+        )
+        connection.commit()
+
+    summary = get_gamification_summary(normalized_user_id)
+    summary.update({
+        "awarded": True,
+        "duplicate": False,
+        "points_awarded": normalized_points,
+        "prediction_id": normalized_prediction_id,
+        "organization_unit": normalized_unit,
+    })
+    return summary
+
+
+def get_gamification_leaderboard(limit: int = 10) -> list:
+    """Return organization-unit leaderboard ranked by total points."""
+    limit = _safe_limit(limit, default=10, maximum=50)
+    with closing(get_connection()) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                TRIM(organization_unit) AS organization_unit,
+                SUM(points) AS points,
+                COUNT(*) AS disposal_actions
+            FROM gamification_rewards
+            WHERE TRIM(COALESCE(organization_unit, '')) <> ''
+            GROUP BY TRIM(organization_unit)
+            ORDER BY points DESC, organization_unit ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    return [
+        {
+            "rank": index,
+            "organization_unit": str(row["organization_unit"] or "General"),
+            "points": int(row["points"] or 0),
+            "disposal_actions": int(row["disposal_actions"] or 0),
+        }
+        for index, row in enumerate(rows, start=1)
+    ]
+
+
+# ============================================================
+# ROUND 2 - BIN FILL ESTIMATES
+# ============================================================
+
+def save_bin_fill_estimate(
+    user_id: Optional[int],
+    filename: Optional[str],
+    fill_level: float,
+    status: str,
+    recommendation: str,
+    confidence: float,
+) -> int:
+    """Persist one image-based bin-fill estimate."""
+    with closing(get_connection()) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO bin_fill_estimates (
+                user_id, filename, fill_level, status, recommendation, confidence, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                filename,
+                float(max(0.0, min(fill_level, 100.0))),
+                status,
+                recommendation,
+                float(max(0.0, min(confidence, 100.0))),
+                _now(),
+            ),
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+
+
+def get_bin_fill_history(user_id: Optional[int] = None, limit: int = 20) -> list:
+    """Return recent bin-fill estimates, optionally scoped to one user."""
+    limit = _safe_limit(limit, default=20, maximum=100)
+    with closing(get_connection()) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, user_id, filename, fill_level, status,
+                   recommendation, confidence, created_at
+            FROM bin_fill_estimates
+            WHERE (? IS NULL OR user_id = ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (user_id, user_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
