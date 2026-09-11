@@ -23,7 +23,6 @@ from fastapi import (
     HTTPException,
     UploadFile,
     Request,
-    Form,
 )
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -129,6 +128,7 @@ class GamificationProfileUpdate(BaseModel):
 
 class GamificationAwardRequest(BaseModel):
     prediction_id: str = Field(min_length=1, max_length=120)
+    organization_unit: Optional[str] = Field(default=None, max_length=120)
 
 
 def _b64encode(value: bytes) -> str:
@@ -838,13 +838,13 @@ app.add_middleware(
     CORSMiddleware,
 
     allow_origins=[
-        origin.strip()
-        for origin in os.getenv(
-            "ECOSORT_ALLOWED_ORIGINS",
-             "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://ecosort-ai-waste-classifier.vercel.app,https://localhost,capacitor://localhost",
-        ).split(",")
-        if origin.strip()
-    ],
+    origin.strip()
+    for origin in os.getenv(
+        "ECOSORT_ALLOWED_ORIGINS",
+        "https://ecosort-ai-waste-classifier.vercel.app,https://localhost,http://localhost,capacitor://localhost,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
+    ).split(",")
+    if origin.strip()
+   ],
 
     allow_credentials=True,
 
@@ -1932,17 +1932,10 @@ async def analyze_image(
 @app.post("/predict")
 async def predict_waste(
     file: UploadFile = File(...),
-    organization_unit: Optional[str] = Form(default=None),
     request: Request = None,
 ):
 
     current_user = _require_user(request)
-
-    selected_organization_unit = (
-        str(organization_unit or "").strip()[:120]
-        or str(current_user.get("organization_unit") or "General").strip()[:120]
-        or "General"
-    )
 
     start_time = (
         time.perf_counter()
@@ -2311,7 +2304,6 @@ async def predict_waste(
                 review_status
             ),
             user_id=int(current_user["id"]),
-            organization_unit=selected_organization_unit,
         )
 
 
@@ -2345,8 +2337,6 @@ async def predict_waste(
         ),
 
         "prediction_id": prediction_id,
-
-        "organization_unit": selected_organization_unit,
 
         "detected_item": detected_item,
 
@@ -3099,12 +3089,21 @@ async def gamification_award(
     # The user explicitly confirms the disposal action in the UI.
     # The reward destination can be chosen in GreenPoints; when omitted,
     # the authenticated user's saved organization_unit is used.
-    # IMPORTANT: organization_unit is intentionally NOT accepted here.
-    # The destination was frozen when this prediction was created.
+    requested_unit = str(payload.organization_unit or "").strip()
+    if not requested_unit:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "award_target_required",
+                "message": "Select a department or hostel block for this scan before awarding points.",
+            },
+        )
+
     try:
         result = award_gamification_points(
             user_id=int(user["id"]),
             prediction_id=prediction_id,
+            organization_unit=requested_unit,
             points=10,
             action="correct_disposal",
         )
